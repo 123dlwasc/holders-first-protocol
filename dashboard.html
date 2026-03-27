@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Holders-First • Live Conviction</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0a0a0a; color: #ddd; margin: 0; padding: 20px; }
+    .container { max-width: 1200px; margin: 0 auto; }
+    h1 { color: #00ff9d; text-align: center; margin-bottom: 8px; }
+    .subtitle { text-align: center; color: #666; margin-bottom: 40px; }
+    .score-card {
+      background: linear-gradient(135deg, #111, #1a1a1a);
+      border-radius: 20px;
+      padding: 50px 30px;
+      text-align: center;
+      margin-bottom: 40px;
+      border: 2px solid #00ff9d22;
+    }
+    .score { font-size: 6rem; font-weight: 700; color: #00ff9d; margin: 0; }
+    .score-label { font-size: 1.3rem; color: #888; margin-top: 10px; letter-spacing: 2px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 20px; }
+    .token-card {
+      background: #1a1a1a;
+      border-radius: 16px;
+      padding: 20px;
+      border: 1px solid #333;
+    }
+    .token-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+    .name { font-weight: 600; font-size: 1.1rem; }
+    .ticker { color: #00ccff; font-size: 0.95rem; }
+    .mcap { color: #00ff9d; font-weight: 600; }
+    .stats { margin-top: 16px; display: flex; justify-content: space-between; font-size: 0.95rem; }
+    .multiplier { font-size: 1.4rem; font-weight: bold; color: #00ff9d; }
+    .held { font-size: 0.95rem; color: #aaa; }
+    .copy-btn {
+      background: #333;
+      color: #ddd;
+      border: none;
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      cursor: pointer;
+    }
+    .copy-btn:hover { background: #555; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Holders-First</h1>
+    <p class="subtitle">Live Conviction Oracle • Devnet</p>
+
+    <div class="score-card">
+      <div class="score" id="score">—</div>
+      <div class="score-label">QUALITY SCORE</div>
+    </div>
+
+    <div id="tokens" class="grid"></div>
+
+    <button onclick="refreshDashboard()">Refresh Live Data</button>
+  </div>
+
+  <script>
+    let allTokens = [];
+
+    async function refreshDashboard() {
+      try {
+        const res = await fetch("http://localhost:3000/lookup");
+        const data = await res.json();
+
+        document.getElementById("score").textContent = data.qualityScore || "—";
+
+        allTokens = data.tokens || [];
+
+        let html = "";
+        allTokens.forEach((t, index) => {
+          const mcapStr = t.mcap > 0 ? `$${t.mcap.toLocaleString()}` : "—";
+          html += `
+            <div class="token-card">
+              <div class="token-header">
+                <div>
+                  <div class="name">${t.name}</div>
+                  <div class="ticker">${t.ticker}</div>
+                </div>
+                <div class="mcap">${mcapStr}</div>
+              </div>
+              <div class="stats">
+                <div>Hold: <strong>${t.currentHoldDays}d</strong> | Accrued: <strong>${t.accruedHoldDays}d</strong></div>
+                <div class="multiplier">${t.multiplier}x</div>
+              </div>
+              <div class="held">Held: <strong>${parseFloat(t.currentBalance || 0).toLocaleString()}</strong> tokens</div>
+              <button class="copy-btn" data-index="${index}">Copy CA</button>
+            </div>`;
+        });
+        document.getElementById("tokens").innerHTML = html || "<p>No tokens found</p>";
+
+      } catch (e) {
+        document.getElementById("score").innerHTML = "Offline<br><small>Run <code>node server.js</code> first</small>";
+      }
+    }
+
+    document.addEventListener('click', function(e) {
+      if (e.target.classList.contains('copy-btn')) {
+        const index = parseInt(e.target.getAttribute('data-index'));
+        const mint = allTokens[index].mint;
+        navigator.clipboard.writeText(mint).then(() => {
+          const original = e.target.textContent;
+          e.target.textContent = "✅ Copied!";
+          e.target.style.background = "#00ff9d";
+          e.target.style.color = "#000";
+          setTimeout(() => {
+            e.target.textContent = original;
+            e.target.style.background = "#333";
+            e.target.style.color = "#ddd";
+          }, 1600);
+        });
+      }
+    });
+
+    setInterval(refreshDashboard, 30000);
+    window.onload = refreshDashboard;
+  </script>
+</body>
+</html>

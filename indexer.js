@@ -1,19 +1,50 @@
-require('dotenv').config();
-const axios = require('axios');
-const { MerkleTree } = require('merkletreejs');
-const SHA256 = require('crypto-js/sha256');
+// indexer.js - Final robust version (wall-clock accrual + clean schema)
+const dotenv = require("dotenv");
+dotenv.config();
 
-const WALLET = process.argv[2];
+const Database = require("better-sqlite3");
+const axios = require("axios");
 
-if (!WALLET) {
-  console.error("Usage: node indexer.js <wallet_address>");
-  process.exit(1);
+const db = new Database("./db/hold_states.db");
+const HELIUS_RPC = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY || "YOUR_HELIUS_KEY_HERE"}`;
+
+const NOW = Math.floor(Date.now() / 1000);
+
+function calculateTimeMultiplier(accruedSeconds, currentHoldSeconds) {
+  const effectiveDays = (currentHoldSeconds + 0.3 * accruedSeconds) / 86400;
+  return 1.0 + Math.min(2.0, Math.max(0.0, (effectiveDays - 7) / 23 * 2.0));
 }
 
-const HELIUS_RPC = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
+function updateHoldState(wallet, mint, newBalanceStr, totalSupplyStr) {
+  const dustThreshold = BigInt(totalSupplyStr) * 10000n / 100000000n;
 
-async function calculateQualityScore(wallet) {
-  console.log(`Fetching data for ${wallet}...`);
+  const row = db.prepare(`
+    SELECT current_balance, accrued_hold_seconds, last_indexer_run 
+    FROM hold_states WHERE wallet_address = ? AND mint_address = ?
+  `).get(wallet, mint) || { current_balance: "0", accrued_hold_seconds: 0, last_indexer_run: NOW };
+
+  const oldBal = BigInt(row.current_balance);
+  const newBal = BigInt(newBalanceStr);
+
+  let accrued = Number(row.accrued_hold_seconds);
+  const timeSinceLastRun = NOW - (row.last_indexer_run || NOW);
+
+  if (newBal > dustThreshold) {
+    accrued += timeSinceLastRun;
+  }
+
+  db.prepare(`
+    INSERT OR REPLACE INTO hold_states 
+    (wallet_address, mint_address, current_balance, accrued_hold_seconds, last_indexer_run, mint_total_supply, dust_threshold, mcap)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+  `).run(wallet, mint, newBal.toString(), accrued, NOW, totalSupplyStr, dustThreshold.toString());
+
+  const currentHoldSeconds = newBal > dustThreshold ? timeSinceLastRun : 0;
+  return calculateTimeMultiplier(accrued, currentHoldSeconds);
+}
+
+async function processWallet(wallet) {
+  console.log(`\nProcessing wallet: ${wallet}`);
 
   const TOKEN_PROGRAMS = [
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
@@ -23,88 +54,58 @@ async function calculateQualityScore(wallet) {
   let allAccounts = [];
 
   for (const programId of TOKEN_PROGRAMS) {
-    const res = await axios.post(HELIUS_RPC, {
-      jsonrpc: "2.0",
-      id: "helius",
+    const accountsRes = await axios.post(HELIUS_RPC, {
+      jsonrpc: "2.0", id: "helius",
       method: "getTokenAccountsByOwner",
       params: [wallet, { programId }, { encoding: "jsonParsed" }]
     });
-    allAccounts = allAccounts.concat(res.data.result.value || []);
+    allAccounts = allAccounts.concat(accountsRes.data.result.value || []);
   }
 
-  console.log(`Total token accounts: ${allAccounts.length}`);
+  console.log(`Found ${allAccounts.length} token accounts (both programs)`);
 
-  let scoreSum = 0;
-  let count = 0;
-  const now = Math.floor(Date.now() / 1000);
+  for (const acc of allAccounts) {
+    const info = acc.account.data.parsed.info;
+    const mint = info.mint;
+    const uiAmount = info.tokenAmount.uiAmount || 0;
+    if (uiAmount <= 0) continue;
 
-  for (const account of allAccounts) {
-    const mint = account.account.data.parsed.info.mint;
-    const amount = account.account.data.parsed.info.tokenAmount.uiAmount;
-    if (amount <= 0) continue;
+    const supplyRes = await axios.post(HELIUS_RPC, {
+      jsonrpc: "2.0", id: "helius",
+      method: "getTokenSupply",
+      params: [mint]
+    });
+    const totalSupplyStr = supplyRes.data.result.value.amount;
 
-    // Real MCAP via DexScreener
-    let rawMcap = 0;
+    const timeMultiplier = updateHoldState(wallet, mint, (uiAmount * 1e9).toString(), totalSupplyStr);
+
+    let mcap = 0;
     try {
-      const dex = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
-      const pair = dex.data.pairs?.[0];
-      rawMcap = pair?.fdv || pair?.marketCap || 0;
-      console.log(`  Token ${mint.slice(0,8)}... MCAP $${rawMcap.toLocaleString()}`);
-    } catch (e) {
-      console.log(`  Token ${mint.slice(0,8)}... MCAP fetch failed`);
-      rawMcap = 0;
-    }
-
-    // YOUR SUGGESTED METHOD: per-token account, scan newest to oldest, detect latest full-sell then next buy-in
-    let daysHeld = 0;
-    try {
-      const tokenAccount = account.pubkey; // specific ATA for this mint only
-      const sigRes = await axios.post(HELIUS_RPC, {
-        jsonrpc: "2.0",
-        id: "helius",
-        method: "getSignaturesForAddress",
-        params: [tokenAccount, { limit: 300 }]
-      });
-      const txs = sigRes.data.result || [];
-      let holdStart = now;
-
-      for (const tx of txs.reverse()) { // oldest first
-        try {
-          const txDetail = await axios.post(HELIUS_RPC, {
-            jsonrpc: "2.0",
-            id: "helius",
-            method: "getTransaction",
-            params: [tx.signature, { encoding: "jsonParsed" }]
-          });
-          if (txDetail.data.result?.meta) {
-            const blockTime = txDetail.data.result.blockTime || now;
-            if (blockTime < holdStart) holdStart = blockTime;
-          }
-        } catch (e) {}
-      }
-      daysHeld = Math.floor((now - holdStart) / 86400);
+      const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
+      const pair = dexRes.data.pairs?.[0];
+      mcap = pair?.fdv || pair?.marketCap || 0;
     } catch (e) {}
 
-    const mcapFactor = rawMcap >= 100000 ? 1 : 0;
-    const durationFactor = daysHeld >= 30 ? 1 : 0;
-    const backerFactor = 0.85;
+    db.prepare(`
+      UPDATE hold_states SET mcap = ? WHERE wallet_address = ? AND mint_address = ?
+    `).run(mcap, wallet, mint);
 
-    const holdScore = (0.4 * mcapFactor) + (0.4 * durationFactor) + (0.2 * backerFactor);
-    scoreSum += holdScore;
-    count++;
-
-    console.log(`  Token ${mint.slice(0,8)}... Days held ≈ ${daysHeld}`);
+    console.log(`  ${mint.slice(0,12)}... MCAP $${Math.floor(mcap).toLocaleString()} | Multiplier ${timeMultiplier.toFixed(2)}x`);
   }
-
-  const finalScore = count > 0 ? Math.floor((scoreSum / count) * 100) : 0;
-  console.log(`\nQuality Score for ${wallet}: ${finalScore}%`);
-
-  const leaves = allAccounts.map(a => SHA256(JSON.stringify(a)).toString());
-  const tree = new MerkleTree(leaves, SHA256);
-  const root = tree.getRoot().toString('hex');
-  console.log("Merkle Root:", root);
-
-  return { score: finalScore, merkleRoot: root };
 }
 
-calculateQualityScore(WALLET);
+const wallets = process.argv.slice(2);
+if (wallets.length === 0) {
+  console.error("Error: No wallet provided. Usage: node indexer.js <wallet>");
+  process.exit(1);
+}
+
+console.log(`Starting batch processing for ${wallets.length} wallet(s)...\n`);
+
+(async () => {
+  for (const wallet of wallets) {
+    await processWallet(wallet);
+  }
+  console.log("\nBatch processing finished.");
+  console.log("Run: ANCHOR_PROVIDER_URL=https://api.devnet.solana.com node update-oracle.js");
+})().catch(console.error);

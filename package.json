@@ -1,14 +1,18 @@
 {
+  "name": "holders-first-protocol",
+  "version": "0.2.0",
   "license": "ISC",
   "scripts": {
-    "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
-    "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check"
+    "lint:fix": "prettier \"**/*.{js,ts}\" -w",
+    "lint": "prettier \"**/*.{js,ts}\" --check"
   },
   "dependencies": {
     "@coral-xyz/anchor": "0.32.0",
     "@solana/web3.js": "^1.98.4",
-    "axios": "^1.13.6",
+    "axios": "^1.14.0",
+    "better-sqlite3": "^11.5.0",
     "dotenv": "^17.3.1",
+    "express": "^5.2.1",
     "merkletreejs": "^0.6.0"
   },
   "devDependencies": {
