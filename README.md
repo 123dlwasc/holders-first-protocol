@@ -10,62 +10,75 @@ Kill the 2026 meta of rugs, snipers, and flipper extraction. Replace it with tra
 ## Core Primitive: Reputation Oracle
 A permissionless on-chain oracle that scores wallets based on real skin-in-the-game. Any Solana program can consume Quality Scores through simple CPI.
 
-### Quality Score (v0.2)
-
+### Quality Score (v0.2) — Stable
 ```math
-QualityScore = (0.4 \times MCAPFactor) + (0.4 \times TimeMultiplier) + (0.2 \times BackerFactor)
+QualityScore = (accruedDays × 55 + 65) × timeMultiplier × supplyFactor × mcapFactor
+```
+Hard-capped at 8× global maximum.
+
+- **TimeMultiplier** (dominant, gradual ramp)
+  - < 3 days → 1.0×
+  - 3–7 days → 1.5×
+  - 7–14 days → 2.0×
+  - 14–30 days → 2.5×
+  - 30–60 days → 3.0×
+  - 60+ days → 4.0×
+- **supplyFactor** (strong % of supply owned)
+  - > 0.5% → 2.8×
+  - > 0.1% → 2.0×
+  - > 0.01% → 1.5×
+  - else → 1.0×
+- **mcapFactor** (mild luxury bonus)
+  - > $10M → 1.45×
+  - > $5M → 1.25×
+  - > $2M → 1.1×
+  - else → 1.0×
+
+Final wallet score = average per-token score + small multi-token bonus.
+
+### Hold Duration Logic (Stateful & Accurate)
+The system maintains a persistent per-(wallet, mint) state machine in SQLite.
+
+On every balance change:
+- Balance crosses dust threshold (0.0001% of total supply) from below → BUY event, start current hold clock.
+- Balance drops below dust threshold → SELL event, accrue time to `accrued_hold_seconds`.
+- While above dust → time accrues continuously.
+
+This correctly handles partial sells, dust, and ATA closures without historical rescans.
+
+## Current Implementation
+- **Polling Indexer** (`indexer.js`) – Helius `getTokenAccountsByOwner` + transparent state updates.
+- **Merkle Oracle** (`update-oracle.js`) – Pushes root of all hold states to on-chain PDA.
+- **Quality Score Lookup** (`lookup.js`) – Reads DB and returns clean JSON score + per-token details.
+- Devnet-ready Anchor program skeleton.
+
+All core scripts are now cleaned, error-handled, and production-like.
+
+## How to Run the Pipeline
+
+```bash
+# 1. Update hold states for a wallet
+node indexer.js <wallet_address> [--verbose]
+
+# 2. Push Merkle root to on-chain Oracle
+ANCHOR_PROVIDER_URL=https://api.devnet.solana.com node update-oracle.js
+
+# 3. Lookup quality score
+ANCHOR_PROVIDER_URL=https://api.devnet.solana.com node lookup.js <wallet_address>
 ```
 
-- **MCAPFactor** = 1.0 if the token has reached ≥ $100k market cap  
-- **TimeMultiplier** = graduated hold duration multiplier (see below)  
-- **BackerFactor** = recursive average quality of previous successful backers
+## Next Steps (in order)
+1. Real-time updater (Helius webhooks) – already prototyped, will become primary path.
+2. On-chain Merkle proof verification + permissionless self-claim.
+3. Loyalty badges (NFT layer on top of scores).
+4. Time-weighted holder rewards from protocol fees.
+5. Optional $100k MCAP fair-launch escrow primitive.
 
-### Hold Duration Logic (Stateful & Real-Time)
-The indexer maintains a persistent per-(wallet, mint) state machine (Helius batch polling for MVP, webhooks for production).
-
-On every balance-changing transaction:
-- Balance rises from 0 → start current hold clock (`last_buy_blocktime = now`)
-- Balance drops **below 0.0001% of total supply** → treat as full sell: accrue elapsed time to `accrued_hold_seconds`, reset current clock
-- Partial moves above threshold → hold clock continues uninterrupted
-
-This eliminates historical re-scans, correctly handles dust/partial sells/ATA closures, and provides accurate long-term conviction signals.
-
-**TimeMultiplier**
-```math
-effective_days = (current_hold_seconds + 0.3 \times accrued_hold_seconds) / 86400
-
-time_multiplier = 1.0 + \min(2.0, \max(0.0, (effective_days - 7) / 23 \times 2.0))
-```
-
-- < 7 days: 1.0x  
-- 7–30 days: linear ramp to 3.0x  
-- 30+ days: capped at 3.0x
-
-## On-Chain Implementation
-Merkle-rooted PDA storing verified Quality Score and per-token hold data. Supports updates and future permissionless self-claim verification for maximum robustness.
-
-## Planned Features
-- Permanent Loyalty Badges for proven early + long-term holders
-- Time-weighted holder rewards funded by protocol fees
-- Optional Fair Launch Escrow ($100k MCAP fixed-price countdown)
-- Token Certification for existing memecoins
-
-## Current Status (March 2026)
-- Full Anchor project structure and documentation pushed
-- Indexer foundation (`indexer.js`) with Helius integration started
-- Hold duration logic, Quality Score formula, and oracle design fully locked
-- Preparing for first devnet deployment of the Reputation Oracle
-
-Still early foundation phase.
-
-## Next Steps
-- Stateful indexer (batch polling → webhook-ready)
-- On-chain PDA layout + Merkle proof verification
-- Recursive BackerFactor logic
-- Basic frontend for score lookup and certification
+## Repository Status (April 2026)
+Foundation complete. The polling pipeline is stable, trustworthy, and ready for real use. 
 
 Open to serious PRs and collaborators only.
 
-**@stoner_broke** | DMs open for builders.
+**@stoner_broke** | DMs open.
 
 Built with conviction.

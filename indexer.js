@@ -1,4 +1,6 @@
-// indexer.js - Final robust version (wall-clock accrual + clean schema)
+// indexer.js - Holders First: Polling-based hold state indexer
+// Usage: node indexer.js <wallet1> [wallet2 ...] [--verbose]
+
 const dotenv = require("dotenv");
 dotenv.config();
 
@@ -6,45 +8,91 @@ const Database = require("better-sqlite3");
 const axios = require("axios");
 
 const db = new Database("./db/hold_states.db");
-const HELIUS_RPC = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY || "YOUR_HELIUS_KEY_HERE"}`;
+const HELIUS_RPC = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
 
-const NOW = Math.floor(Date.now() / 1000);
+const isVerbose = process.argv.includes("--verbose");
 
-function calculateTimeMultiplier(accruedSeconds, currentHoldSeconds) {
-  const effectiveDays = (currentHoldSeconds + 0.3 * accruedSeconds) / 86400;
-  return 1.0 + Math.min(2.0, Math.max(0.0, (effectiveDays - 7) / 23 * 2.0));
+function getDustThreshold(totalSupplyStr) {
+  return (BigInt(totalSupplyStr) / 1_000_000n).toString();
 }
 
-function updateHoldState(wallet, mint, newBalanceStr, totalSupplyStr) {
-  const dustThreshold = BigInt(totalSupplyStr) * 10000n / 100000000n;
+async function getTokenSupply(mint) {
+  try {
+    const res = await axios.post(HELIUS_RPC, {
+      jsonrpc: "2.0",
+      id: "helius",
+      method: "getTokenSupply",
+      params: [mint]
+    });
+    return {
+      amount: res.data.result.value.amount,
+      decimals: res.data.result.value.decimals
+    };
+  } catch (e) {
+    console.warn(`[INDEXER] Failed to get supply for ${mint.slice(0,12)}...`);
+    return { amount: "0", decimals: 9 };
+  }
+}
+
+function updateHoldState(wallet, mint, newRawBalanceStr, totalSupplyStr) {
+  const NOW = Math.floor(Date.now() / 1000);
+  const dustThreshold = BigInt(getDustThreshold(totalSupplyStr));
+  const newBalance = BigInt(newRawBalanceStr);
 
   const row = db.prepare(`
-    SELECT current_balance, accrued_hold_seconds, last_indexer_run 
-    FROM hold_states WHERE wallet_address = ? AND mint_address = ?
-  `).get(wallet, mint) || { current_balance: "0", accrued_hold_seconds: 0, last_indexer_run: NOW };
+    SELECT current_balance, accrued_hold_seconds, last_buy_blocktime, last_updated_slot
+    FROM hold_states 
+    WHERE wallet_address = ? AND mint_address = ?
+  `).get(wallet, mint) || {
+    current_balance: "0",
+    accrued_hold_seconds: 0,
+    last_buy_blocktime: NOW,
+    last_updated_slot: NOW
+  };
 
-  const oldBal = BigInt(row.current_balance);
-  const newBal = BigInt(newBalanceStr);
-
+  const oldBalance = BigInt(row.current_balance);
   let accrued = Number(row.accrued_hold_seconds);
-  const timeSinceLastRun = NOW - (row.last_indexer_run || NOW);
+  let lastBuy = row.last_buy_blocktime || NOW;
+  const lastUpdated = Number(row.last_updated_slot || NOW);
 
-  if (newBal > dustThreshold) {
-    accrued += timeSinceLastRun;
+  const wasHolding = oldBalance >= dustThreshold;
+  const isHolding = newBalance >= dustThreshold;
+
+  if (!wasHolding && isHolding) {
+    lastBuy = NOW;
+    if (isVerbose) console.log(`[INDEXER] [BUY EVENT] ${mint.slice(0,12)}...`);
+  } else if (wasHolding && !isHolding) {
+    if (lastBuy) accrued += (NOW - lastBuy);
+    lastBuy = null;
+    if (isVerbose) console.log(`[INDEXER] [SELL BELOW DUST] ${mint.slice(0,12)}...`);
+  } else if (isHolding) {
+    const elapsed = NOW - lastUpdated;
+    if (elapsed > 0) {
+      accrued += elapsed;
+    }
   }
 
   db.prepare(`
-    INSERT OR REPLACE INTO hold_states 
-    (wallet_address, mint_address, current_balance, accrued_hold_seconds, last_indexer_run, mint_total_supply, dust_threshold, mcap)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-  `).run(wallet, mint, newBal.toString(), accrued, NOW, totalSupplyStr, dustThreshold.toString());
+    INSERT OR REPLACE INTO hold_states
+    (wallet_address, mint_address, current_balance, last_buy_blocktime,
+     accrued_hold_seconds, last_updated_slot, mint_total_supply, dust_threshold)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    wallet, mint, newBalance.toString(), lastBuy,
+    Math.floor(accrued), NOW, totalSupplyStr, getDustThreshold(totalSupplyStr)
+  );
 
-  const currentHoldSeconds = newBal > dustThreshold ? timeSinceLastRun : 0;
-  return calculateTimeMultiplier(accrued, currentHoldSeconds);
+  const currentHoldSeconds = lastBuy ? NOW - lastBuy : 0;
+
+  return {
+    isHolding,
+    currentHoldSeconds,
+    accruedHoldSeconds: accrued
+  };
 }
 
 async function processWallet(wallet) {
-  console.log(`\nProcessing wallet: ${wallet}`);
+  if (isVerbose) console.log(`\n[INDEXER] Processing wallet: ${wallet}`);
 
   const TOKEN_PROGRAMS = [
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
@@ -52,60 +100,70 @@ async function processWallet(wallet) {
   ];
 
   let allAccounts = [];
-
   for (const programId of TOKEN_PROGRAMS) {
-    const accountsRes = await axios.post(HELIUS_RPC, {
-      jsonrpc: "2.0", id: "helius",
-      method: "getTokenAccountsByOwner",
-      params: [wallet, { programId }, { encoding: "jsonParsed" }]
-    });
-    allAccounts = allAccounts.concat(accountsRes.data.result.value || []);
+    try {
+      const res = await axios.post(HELIUS_RPC, {
+        jsonrpc: "2.0",
+        id: "helius",
+        method: "getTokenAccountsByOwner",
+        params: [wallet, { programId }, { encoding: "jsonParsed" }]
+      });
+      if (res.data.result?.value) allAccounts = allAccounts.concat(res.data.result.value);
+    } catch (e) {
+      console.error(`[INDEXER] Failed to fetch token accounts for program ${programId.slice(0,8)}...`);
+    }
   }
 
-  console.log(`Found ${allAccounts.length} token accounts (both programs)`);
+  if (isVerbose) console.log(`[INDEXER] Found ${allAccounts.length} token accounts from Helius`);
+
+  let processed = 0;
+  let skippedZero = 0;
 
   for (const acc of allAccounts) {
     const info = acc.account.data.parsed.info;
     const mint = info.mint;
-    const uiAmount = info.tokenAmount.uiAmount || 0;
-    if (uiAmount <= 0) continue;
+    const uiAmount = info.tokenAmount.uiAmount ?? 0;
 
-    const supplyRes = await axios.post(HELIUS_RPC, {
-      jsonrpc: "2.0", id: "helius",
-      method: "getTokenSupply",
-      params: [mint]
-    });
-    const totalSupplyStr = supplyRes.data.result.value.amount;
+    if (uiAmount <= 0) {
+      if (isVerbose) console.log(`[INDEXER] [SKIPPED] ${mint.slice(0,12)}... | Balance: 0`);
+      skippedZero++;
+      continue;
+    }
 
-    const timeMultiplier = updateHoldState(wallet, mint, (uiAmount * 1e9).toString(), totalSupplyStr);
+    processed++;
 
-    let mcap = 0;
-    try {
-      const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
-      const pair = dexRes.data.pairs?.[0];
-      mcap = pair?.fdv || pair?.marketCap || 0;
-    } catch (e) {}
+    const supplyData = await getTokenSupply(mint);
+    const totalSupplyStr = supplyData.amount;
+    const decimals = supplyData.decimals;
 
-    db.prepare(`
-      UPDATE hold_states SET mcap = ? WHERE wallet_address = ? AND mint_address = ?
-    `).run(mcap, wallet, mint);
+    const rawBalanceStr = Math.floor(uiAmount * Math.pow(10, decimals)).toString();
 
-    console.log(`  ${mint.slice(0,12)}... MCAP $${Math.floor(mcap).toLocaleString()} | Multiplier ${timeMultiplier.toFixed(2)}x`);
+    const state = updateHoldState(wallet, mint, rawBalanceStr, totalSupplyStr);
+
+    console.log(`[INDEXER] ${mint.slice(0,12)}... | Balance: ${uiAmount.toFixed(4)} | Holding: ${state.isHolding} | Current: ${Math.floor(state.currentHoldSeconds/86400)}d | Accrued: ${state.accruedHoldSeconds}s`);
+  }
+
+  if (isVerbose || processed > 0) {
+    console.log(`[INDEXER] Summary: Processed ${processed} holding tokens | Skipped ${skippedZero} zero-balance accounts`);
   }
 }
 
-const wallets = process.argv.slice(2);
+const wallets = process.argv.filter(arg => !arg.startsWith("--"));
+wallets.shift(); // remove 'node' and script name
+
 if (wallets.length === 0) {
-  console.error("Error: No wallet provided. Usage: node indexer.js <wallet>");
+  console.error("[INDEXER] Usage: node indexer.js <wallet1> [wallet2 ...] [--verbose]");
   process.exit(1);
 }
 
-console.log(`Starting batch processing for ${wallets.length} wallet(s)...\n`);
-
 (async () => {
-  for (const wallet of wallets) {
-    await processWallet(wallet);
+  try {
+    for (const wallet of wallets) {
+      await processWallet(wallet);
+    }
+    console.log("[INDEXER] Run completed successfully.");
+  } catch (err) {
+    console.error("[INDEXER] Fatal error:", err.message);
+    process.exit(1);
   }
-  console.log("\nBatch processing finished.");
-  console.log("Run: ANCHOR_PROVIDER_URL=https://api.devnet.solana.com node update-oracle.js");
-})().catch(console.error);
+})();

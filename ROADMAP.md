@@ -1,37 +1,40 @@
 # Roadmap
 
-**Current Phase: Foundation (v0.2)**
+**Current Phase: Foundation Complete (v0.2)**
 
-Building the core Reputation Oracle primitive with accurate, stateful hold duration tracking and graduated TimeMultiplier.
+The core Reputation Oracle is now live and stable.
 
-- Anchor program skeleton + full project structure pushed
-- Indexer foundation in place (`indexer.js` with Helius parsing)
-- Quality Score formula + Hold Duration logic fully specified and locked in README
-- Vision, economic model, and on-chain design documented
+### Delivered
+- Stateful hold duration indexer (`indexer.js`) with accurate buy/sell/dust logic and 0.0001% supply threshold
+- Merkle-rooted on-chain Oracle PDA with successful root updates on devnet
+- Quality Score v0.2 formula (gradual time ramp + strong supplyFactor + mild mcapFactor + hard 8× global cap)
+- Clean, production-ready scripts with consistent logging and error handling
+- Full end-to-end pipeline: indexer → SQLite → Merkle root → lookup
 
-**Next Steps (Immediate Priority - Next 1-3 weeks)**
+The polling foundation is trustworthy and ready for real wallets.
 
-- [ ] Implement stateful hold duration indexer (batch polling MVP + Helius webhook-ready architecture, 0.0001% supply dust threshold, graduated multiplier)
-- [ ] Design and implement on-chain Reputation Oracle PDA layout (Merkle root of per-(wallet, mint) hold data: current_hold_seconds, accrued_hold_seconds, time_multiplier)
-- [ ] Build permissionless self-claim instruction for hold proof verification
-- [ ] Implement full Merkle proof verification on-chain
-- [ ] Add recursive BackerFactor logic to indexer + on-chain
-- [ ] Basic frontend for Quality Score lookup and token certification
+### Immediate Next Steps (Next 1-2 weeks)
+- Real-time updater via Helius webhooks (already prototyped — make it the primary path)
+- On-chain Merkle proof verification + permissionless self-claim instruction
+- Basic integration tests and improved error resilience
+- Update Anchor program skeleton to expose clean CPI interface
 
-**Future Phases**
-
-**Phase 1 – Certification & Rewards**
+### Phase 1 – Certification & Rewards
 - Token Certification flow for existing memecoins
-- Holder rewards distribution (time-weighted from protocol fees)
-- Loyalty Badges (permanent on-chain)
+- Time-weighted holder rewards from protocol fees
+- Loyalty Badges (NFT layer on top of Quality Scores)
 
-**Phase 2 – Fair Launch Escrow**
-- Optional fixed $100k MCAP countdown escrow launch mechanism
-- Pro-rata distribution + anti-sniper mechanics
+### Phase 2 – Fair Launch Primitive
+- Optional $100k MCAP fixed-price escrow launch mechanism
+- Refundable votes + anti-sniper mechanics
+- Pro-rata distribution for true holders
 
-**Phase 3 – Ecosystem Primitive**
-- Public Reputation Oracle (easy CPI access for any launcher/dApp)
-- Governance for parameter adjustments
-- Big-bag multiplier (top 5% holder boost)
+### Phase 3 – Ecosystem Primitive
+- Public Reputation Oracle (easy CPI access for any launcher or dApp)
+- Governance for adjusting multipliers and parameters
+- “Big-bag” multiplier for top holders
 
-**Status:** Solo development – fully open to serious PRs and collaborators.
+**Status (April 2026):**  
+Foundation is solid. Solo development for now — fully open to serious collaborators and PRs who want to help ship the real-time layer and on-chain verification.
+
+The original vision remains unchanged: build a holders-first world where conviction is measurable, rewarded, and respected.

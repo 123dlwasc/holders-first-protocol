@@ -1,29 +1,56 @@
+// update-oracle.js - Holders First: Push Merkle root of hold states to on-chain Oracle
+// Usage: ANCHOR_PROVIDER_URL=https://api.devnet.solana.com node update-oracle.js
+
 const anchor = require("@coral-xyz/anchor");
 const { PublicKey } = require("@solana/web3.js");
+const { Keypair } = require("@solana/web3.js");
+const fs = require("fs");
+const path = require("path");
 const Database = require("better-sqlite3");
 const { MerkleTree } = require("merkletreejs");
 const crypto = require("crypto");
 
+const db = new Database("./db/hold_states.db");
+
+function getWallet() {
+  const defaultPath = path.join(process.env.HOME || process.env.USERPROFILE, ".config/solana/id.json");
+
+  if (process.env.ANCHOR_WALLET) {
+    return anchor.Wallet.local(process.env.ANCHOR_WALLET);
+  }
+
+  if (fs.existsSync(defaultPath)) {
+    const secretKey = Uint8Array.from(JSON.parse(fs.readFileSync(defaultPath, "utf-8")));
+    const keypair = Keypair.fromSecretKey(secretKey);
+    return new anchor.Wallet(keypair);
+  }
+
+  throw new Error(`ANCHOR_WALLET not set and default keypair not found at ${defaultPath}.\nRun: solana-keygen new or set ANCHOR_WALLET env variable.`);
+}
+
+const wallet = getWallet();
+
 const provider = new anchor.AnchorProvider(
   new anchor.web3.Connection("https://api.devnet.solana.com", "confirmed"),
-  anchor.Wallet.local(),
+  wallet,
   { commitment: "confirmed" }
 );
+
 anchor.setProvider(provider);
 
 const program = anchor.workspace.HoldersFirst;
-const db = new Database("./db/hold_states.db");
 
 function sha256(data) {
   return crypto.createHash("sha256").update(Buffer.from(data)).digest();
 }
 
 async function pushMerkleRoot() {
-  console.log("\n=== Pushing Merkle Root to Oracle ===");
+  console.log("[ORACLE] Pushing Merkle root to on-chain Oracle...");
 
   const rows = db.prepare("SELECT * FROM hold_states").all();
+
   if (rows.length === 0) {
-    console.log("No records in DB");
+    console.log("[ORACLE] No records in DB - nothing to push");
     return;
   }
 
@@ -35,31 +62,37 @@ async function pushMerkleRoot() {
   });
 
   const tree = new MerkleTree(leaves, sha256);
-  const root = tree.getRoot();
+  const root = tree.getRoot().toString("hex");
 
-  console.log(`Records: ${rows.length}`);
-  console.log(`New Root : ${root.toString("hex")}`);
+  console.log(`[ORACLE] Records: ${rows.length} | Root: ${root}`);
 
-  const [oraclePda] = PublicKey.findProgramAddressSync([Buffer.from("oracle_root")], program.programId);
+  const [oraclePda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("oracle_root")], 
+    program.programId
+  );
 
   try {
     const slot = await program.provider.connection.getSlot("confirmed");
 
     const tx = await program.methods
-      .updateOracleRoot(root, new anchor.BN(slot))
+      .updateOracleRoot(Buffer.from(root, "hex"), new anchor.BN(slot))
       .accounts({
         oracle: oraclePda,
         authority: program.provider.wallet.publicKey,
       })
       .rpc({ commitment: "confirmed", skipPreflight: true });
 
-    console.log("✅ Root successfully updated on-chain");
-    console.log("Tx:", tx);
+    console.log(`[ORACLE] ✅ Root successfully updated on-chain`);
+    console.log(`[ORACLE] Tx: ${tx}`);
   } catch (err) {
-    console.error("❌ Failed to update root:");
-    console.error(err.message);
-    if (err.logs) console.error("Logs:", err.logs);
+    console.error(`[ORACLE] ❌ Failed to update root:`);
+    console.error(`[ORACLE] ${err.message}`);
+    if (err.logs) console.error(`[ORACLE] Logs:`, err.logs);
+    process.exit(1);
   }
 }
 
-pushMerkleRoot().catch(console.error);
+pushMerkleRoot().catch(err => {
+  console.error("[ORACLE] Fatal error:", err.message);
+  process.exit(1);
+});
