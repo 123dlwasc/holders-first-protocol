@@ -1,4 +1,4 @@
-# macOS junk
+# macOS
 .DS_Store
 .DS_Store?
 ._*
@@ -7,37 +7,41 @@
 ehthumbs.db
 Thumbs.db
 
-# Project files
-.anchor
-target
-**/*.rs.bk
-node_modules
-test-ledger
+# Dependencies
+node_modules/
 .yarn
 
-# Environment & secrets
-.env
-.env.local
-.env.*.local
+# Build / Target
+target/
+.anchor/
+dist/
+build/
 
-# Database - NEVER commit this
+# Database
 db/
 *.db
 *.sqlite
 *.sqlite3
 
-# Archive of old experiments
-archive/
+# Environment
+.env
+.env.local
+.env.*.local
 
-# Logs and temporary files
+# Logs
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Build outputs
-dist/
-build/
+# Archive
+archive/
 
-# Anchor specific
-.anchor/
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Prettier
+.prettierignore
