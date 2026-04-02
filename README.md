@@ -15,6 +15,7 @@ with a hard global 8× cap.
 - **timeMultiplier**: Gradual ramp from 1.0× to 4.0× based on hold days
 - **supplyFactor**: Strong boost up to 2.8× for larger ownership percentage
 - **mcapFactor**: Mild bonus up to 1.45× for higher market cap tokens
+
 ### Hold Duration Logic
 
 Persistent per-(wallet, mint) state machine in SQLite.
